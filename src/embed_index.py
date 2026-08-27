@@ -10,6 +10,14 @@ import numpy as np
 
 CONFIG_PATH = Path(__file__).parent.parent / "configs" / "config.yaml"
 
+# module-level model cache (perf fix #3)
+_EMB_TOK = None
+_EMB_MDL = None
+_EMB_DEVICE = None
+_CE_TOK = None
+_CE_MDL = None
+_CE_DEVICE = None
+
 def load_config():
     with open(CONFIG_PATH) as f:
         return yaml.safe_load(f)
@@ -20,6 +28,34 @@ def get_device():
         return "cuda" if torch.cuda.is_available() else "cpu"
     except:
         return "cpu"
+
+def _get_emb_model(device):
+    global _EMB_TOK, _EMB_MDL, _EMB_DEVICE
+    if _EMB_TOK is not None and _EMB_MDL is not None and _EMB_DEVICE == device:
+        return _EMB_TOK, _EMB_MDL
+    from transformers import AutoTokenizer, AutoModel
+    import torch
+    cfg = load_config()
+    cache_path = Path.home() / ".cache/huggingface/hub/models--sentence-transformers--all-MiniLM-L6-v2/snapshots/1110a243fdf4706b3f48f1d95db1a4f5529b4d41"
+    load_name = str(cache_path) if cache_path.exists() else cfg["models"]["embedding"]
+    _EMB_TOK = AutoTokenizer.from_pretrained(load_name, local_files_only=cache_path.exists())
+    _EMB_MDL = AutoModel.from_pretrained(load_name, local_files_only=cache_path.exists()).to(device)
+    _EMB_MDL.eval()
+    _EMB_DEVICE = device
+    return _EMB_TOK, _EMB_MDL
+
+def _get_ce_model(device):
+    global _CE_TOK, _CE_MDL, _CE_DEVICE
+    if _CE_TOK is not None and _CE_MDL is not None and _CE_DEVICE == device:
+        return _CE_TOK, _CE_MDL
+    from transformers import AutoTokenizer as CETok, AutoModelForSequenceClassification
+    cfg = load_config()
+    ce_name = cfg["models"]["reranker"]
+    _CE_TOK = CETok.from_pretrained(ce_name)
+    _CE_MDL = AutoModelForSequenceClassification.from_pretrained(ce_name).to(device)
+    _CE_MDL.eval()
+    _CE_DEVICE = device
+    return _CE_TOK, _CE_MDL
 
 def load_chunks(chunks_path: str):
     chunks = []
@@ -43,17 +79,8 @@ def build_index():
     texts = [c["text"] for c in chunks]
     print(f"[embed] embedding {len(texts)} chunks with {cfg['models']['embedding']}")
 
-    # Use transformers directly to avoid sentence-transformers segfault (see investigation)
-    from transformers import AutoTokenizer, AutoModel
     import torch
-    model_name = cfg["models"]["embedding"]
-    # try local snapshot first, else hub
-    cache_path = Path.home() / ".cache/huggingface/hub/models--sentence-transformers--all-MiniLM-L6-v2/snapshots/1110a243fdf4706b3f48f1d95db1a4f5529b4d41"
-    load_name = str(cache_path) if cache_path.exists() else model_name
-    tok = AutoTokenizer.from_pretrained(load_name, local_files_only=cache_path.exists())
-    mdl = AutoModel.from_pretrained(load_name, local_files_only=cache_path.exists())
-    mdl = mdl.to(device)
-    mdl.eval()
+    tok, mdl = _get_emb_model(device)
     def _encode(texts_, batch_size=32):
         all_embs = []
         with torch.no_grad():
@@ -74,10 +101,15 @@ def build_index():
     embeddings = _encode(texts, batch_size=32)
 
     import faiss
+    # ensure L2-normalized for IP == cosine (explicit, even though torch normalized)
+    faiss.normalize_L2(embeddings)
     dim = embeddings.shape[1]
-    print(f"[embed] building FAISS index dim={dim}")
+    print(f"[embed] building FAISS index dim={dim} (IP, L2-normalized, k_recall={cfg['retrieval']['faiss_k']} -> rerank {cfg['retrieval']['rerank_k']})")
     index = faiss.IndexFlatIP(dim)  # cosine via normalized
     index.add(embeddings)
+    # sanity: verify normalized
+    norms = (embeddings**2).sum(axis=1)
+    print(f"[embed] sanity norms mean={norms.mean():.4f} min={norms.min():.4f} max={norms.max():.4f} (should be ~1.0)")
     index_path.parent.mkdir(parents=True, exist_ok=True)
     faiss.write_index(index, str(index_path))
     print(f"[embed] saved index to {index_path} ({index.ntotal} vectors)")
@@ -96,6 +128,8 @@ def build_index():
         # reuse tok/mdl from above closure — recreate quickly
         return _encode(qs, batch_size=8)
     q_emb = _encode([test_q])
+    import faiss as _faiss
+    _faiss.normalize_L2(q_emb)
     scores, ids = index.search(q_emb, 5)
     print(f"[test] query: {test_q}")
     for rank, (idx, score) in enumerate(zip(ids[0], scores[0])):
@@ -103,16 +137,12 @@ def build_index():
         src = chunks[idx]['source'][:60]
         print(f"  {rank+1}. score={score:.3f} src={src} text={txt}...")
 
-    # quick rerank demo if cross-encoder available (optional, uses transformers)
+    # quick rerank demo if cross-encoder available (cached)
     try:
-        from transformers import AutoTokenizer as CETok, AutoModelForSequenceClassification
         import torch
-        ce_name = cfg["models"]["reranker"]
-        # try cached, else download
+        # try cached
         try:
-            ce_tok = CETok.from_pretrained(ce_name)
-            ce_mdl = AutoModelForSequenceClassification.from_pretrained(ce_name).to(device)
-            ce_mdl.eval()
+            ce_tok, ce_mdl = _get_ce_model(device)
             top_k = min(10, len(texts))
             scores, ids = index.search(q_emb, top_k)
             pairs = [(test_q, chunks[i]["text"]) for i in ids[0]]
@@ -148,18 +178,11 @@ def search(query: str, k: int = None, rerank_k: int = None):
         raise FileNotFoundError("FAISS index not found. Run embed_index.py first.")
 
     import faiss
-    from transformers import AutoTokenizer, AutoModel
     import torch
     with open(meta_path, "rb") as f:
         chunks = pickle.load(f)
     index = faiss.read_index(str(index_path))
-    # load embedding model via transformers (same as build_index)
-    cache_path = Path.home() / ".cache/huggingface/hub/models--sentence-transformers--all-MiniLM-L6-v2/snapshots/1110a243fdf4706b3f48f1d95db1a4f5529b4d41"
-    load_name = str(cache_path) if cache_path.exists() else cfg["models"]["embedding"]
-    tok = AutoTokenizer.from_pretrained(load_name, local_files_only=cache_path.exists())
-    mdl = AutoModel.from_pretrained(load_name, local_files_only=cache_path.exists())
-    mdl = mdl.to(device)
-    mdl.eval()
+    tok, mdl = _get_emb_model(device)
     def _encode_q(texts_, batch_size=8):
         all_embs = []
         with torch.no_grad():
@@ -177,16 +200,15 @@ def search(query: str, k: int = None, rerank_k: int = None):
                 all_embs.append(emb.cpu().numpy())
         return np.vstack(all_embs).astype("float32")
     q_emb = _encode_q([query])
+    faiss.normalize_L2(q_emb)
+    # confirm k is specced 10-15
+    print(f"[search] FAISS recall k={k} -> rerank_k={rerank_k} for query '{query[:40]}...'") if False else None
     scores, ids = index.search(q_emb, k)
     candidates = [(int(idx), float(score), chunks[idx]) for idx, score in zip(ids[0], scores[0]) if idx != -1]
 
-    # rerank via cross-encoder (optional)
+    # rerank via cross-encoder (cached)
     try:
-        from transformers import AutoTokenizer as CETok, AutoModelForSequenceClassification
-        ce_name = cfg["models"]["reranker"]
-        ce_tok = CETok.from_pretrained(ce_name)
-        ce_mdl = AutoModelForSequenceClassification.from_pretrained(ce_name).to(device)
-        ce_mdl.eval()
+        ce_tok, ce_mdl = _get_ce_model(device)
         pairs = [(query, c["text"]) for _, _, c in candidates]
         ce_scores = []
         with torch.no_grad():
