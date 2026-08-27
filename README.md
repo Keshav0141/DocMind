@@ -54,18 +54,23 @@ python src/benchmark.py
 
 Runs the 25-query eval set end to end, logs latency/relevance/cache metrics to MLflow and W&B, and writes results to `data/processed/bench_*.json`.
 
-**Results (25 eval queries, 17/25 corpus-answerable):**
+**Results (25 eval queries, 16/25 corpus-answerable — hand-verified):**
 
 | Metric | Value |
 |---|---|
-| Precision@3, FAISS-only | 17.6% (3/17) |
-| Precision@3, FAISS+rerank | 5.9% (1/17) |
-| Cold latency (clean generation) | 9,166 ms |
-| Cold latency (wall, incl. rate-limit retries) | 14,832 ms |
+| Precision@3, FAISS-only | 6.2% (1/16) |
+| Precision@3, FAISS+rerank | 6.2% (1/16) |
+| Lift | 0.0pp |
+| Cold latency (clean generation) | 8,258 ms |
+| Cold latency (wall, incl. rate-limit retries) | 12,878 ms |
+| Cold fallback routing | 44% (11/25) |
 | Warm cache hit rate | 100% (repeated queries) |
-| Warm cache latency | 1,759 ms (bottlenecked by remote Redis RTT, not compute) |
+| Warm cache latency | 1,593 ms (remote Redis RTT, not compute) |
+| Warm fallback routing | 44% (11/25) |
+| Router | FAISS top-1 < 0.30 → fallback (14/11 split vs intended 16/9) |
+| Relevance (cosine >0.35) | 52.0% |
 
-Precision@3 was measured against a hand-tagged subset of the eval set (17 of 25 queries have a verifiable answer chunk in the corpus; the remaining 8 target the fallback tool). The negative rerank lift is likely a labeling artifact from keyword-heuristic eval labels rather than a true regression — cross-encoders often deprioritize keyword matches in favor of semantic relevance, which a keyword-based label set can't credit. A hand-verified label set would give a more trustworthy number.
+Precision@3 was measured against hand-verified labels (16 of 25 queries have a verifiable answer chunk; 9 target the fallback tool — `cross-encoder` query moved to fallback after checking 0/304 chunks contain the term). Both retrievers scored 1/16, so lift is 0.0pp — the earlier -11.8pp/ -4.0pp was from keyword-heuristic labels and is now replaced. Small corpus + noisy LangChain docs (many pages share the same `Agent = Model + Harness` header, `FAISS` term in 0 chunks) keep absolute precision low; a larger, cleaner corpus would be needed for higher numbers.
 
 ## Notes
 

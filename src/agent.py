@@ -28,22 +28,39 @@ class AgentState(TypedDict, total=False):
     cache_hit: bool
     provider: str
 
-# Router heuristic: fallback for very short / keyword-style queries that FAISS handles poorly?
-# Keep simple: if query length < 4 words and contains no "what/how/why/explain", use fallback sometimes
-# For demo we default to retrieval; fallback routing is demonstrated via explicit flag
+# Router: similarity-threshold (FAISS top-1 < threshold → fallback)
+# Replaces naive keyword/length heuristic. Runs FAISS recall first, checks top-1 score.
 def router_node(state: AgentState):
     q = state["question"]
-    # simple rule: if query contains "keyword" or is very short, route to fallback 20% demo
-    # Otherwise retrieval
-    # We also check if user explicitly prefixes with "keyword:"
-    if q.lower().startswith("keyword:") or len(q.split()) <= 2:
-        route = "fallback"
-    else:
-        route = "retrieval"
-    state["route"] = route
-    return state
+    # explicit keyword prefix still forces fallback for demo
+    if q.lower().startswith("keyword:"):
+        state["route"] = "fallback"
+        return state
+    try:
+        from src.embed_index import search
+        cfg = load_config()
+        # use FAISS recall k=15, check top-1 faiss_score (cosine, L2-normalized)
+        hits = search(q, k=cfg["retrieval"]["faiss_k"], rerank_k=cfg["retrieval"]["rerank_k"])
+        top_score = hits[0]["faiss_score"] if hits else 0.0
+        threshold = 0.30  # tuned on 25-query eval: 14/11 split vs intended 16/9; 0.25 gave 19/6, 0.30 is closer and more conservative
+        # also consider rerank_score? but faiss_score is cosine, more stable for threshold
+        route = "fallback" if top_score < threshold else "retrieval"
+        # store hits to avoid double retrieval in next node (optimization)
+        state["route"] = route
+        state["_router_hits"] = hits
+        state["_router_score"] = top_score
+        return state
+    except Exception as e:
+        print(f"[router] threshold check failed: {e}, defaulting to retrieval")
+        state["route"] = "retrieval"
+        return state
 
 def retrieval_node(state: AgentState):
+    # reuse hits from router if available (threshold router already did retrieval)
+    if "_router_hits" in state and state.get("route") == "retrieval":
+        state["hits"] = state.pop("_router_hits")
+        state.pop("_router_score", None)
+        return state
     from .embed_index import search
     cfg = load_config()
     hits = search(state["question"], k=cfg["retrieval"]["faiss_k"], rerank_k=cfg["retrieval"]["rerank_k"])

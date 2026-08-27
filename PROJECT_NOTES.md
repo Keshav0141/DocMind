@@ -14,27 +14,27 @@ Domain RAG over LangChain/LangGraph docs (304 chunks from 44 docs). Ingest → s
 - **Groq / Ollama (`src/generate.py:1`):** Swappable `generate_groq`/`generate_ollama` same signature. Groq `openai/gpt-oss-20b` (fast, free-tier), Ollama local fallback (auto GPU). Retry with backoff for 429.
 - **MLflow + W&B (`src/benchmark.py:1`):** MLflow tracks latency, relevance (cosine), hit/miss per query; W&B logs similarity distribution histogram. Both run per `benchmark.py` batch.
 
-## Final metrics (25 queries, 17 corpus-answerable, 8 fallback-only)
+## Final metrics (25 queries, 16 corpus-answerable, 9 fallback-only — hand-verified)
 
 | Metric | Value | Notes |
 |---|---|---|
-| **Corpus-answerable** | **17 / 25** (`data/processed/eval_labels.json:1`) | 8 fallback-only marked `answerable:false` (Redis cache, MLflow/W&B, fallback tool, router, latency compare, agentic memory, Redis Cloud, eval relevance) |
-| **Precision@3 FAISS-only** | **17.6%** (3/17) | On answerable subset; `k=15` FAISS top-3 vs heuristic labels (keyword presence). All-25 is 12.0% |
-| **Precision@3 FAISS+rerank** | **5.9%** (1/17) | `k=15→3` cross-encoder rerank. All-25 is 8.0% |
-| **Lift (rerank - FAISS)** | **-11.8pp** (all-25: -4.0pp) | Negative on heuristic labels — see caveats |
-| **Relevance (cosine >0.35)** | **52.0%** avg 0.343 | Per `benchmark.py` embedding sim |
-| **Latency cold (0% hit)** | **clean 9166ms / wall 14832ms** (`data/processed/bench_cold.json:1`) | Clean = Groq API only excl. retry sleep; wall incl. 429 backoff (5666ms). `n=25`, `cuda` |
-| **Latency warm (100% hit)** | **1759ms** (`data/processed/bench_warm.json:1`) | Redis lookup + relevance scoring; ideal local Redis <10ms, remote `retroradiant-blissful-celery:19885` measures 300-2019ms RTT, dominates warm latency. Cold 305s wall → warm 64s wall (4.7x) |
-| **Cache hit rate** | **0% cold / 100% warm** | Earlier partial warm 75% (15/20) |
-| **Fallback routing** | **0%** on 25 eval set (router threshold `len<=2` or `keyword:` prefix) | Short queries route to fallback |
+| **Corpus-answerable** | **16 / 25** (`data/processed/eval_labels.json:1`) | 9 fallback-only `answerable:false` (cross-encoder, Redis cache, MLflow/W&B, fallback tool, router, latency, agentic memory, Redis Cloud, eval relevance) — hand-checked 0/304 chunks contain `cross-encoder` |
+| **Precision@3 FAISS-only** | **6.2%** (1/16) | Hand-verified labels (first chunk from expected source); all-25 = 4.0% |
+| **Precision@3 FAISS+rerank** | **6.2%** (1/16) | `k=15→3` cross-encoder; all-25 = 4.0% |
+| **Lift** | **0.0pp** (heuristic earlier -11.8pp / -4.0pp) | Hand-verified replaces keyword heuristic; lift 0 shows rerank didn't help/hurt on this noisy corpus |
+| **Relevance (cosine >0.35)** | **52.0%** avg 0.321 | Per `benchmark.py` |
+| **Latency cold (0% hit)** | **clean 8258ms / wall 12878ms** (`data/processed/bench_cold.json:1`) | Clean = Groq API excl. retry; wall incl. TPD 200k limit retries. `n=25`, `cuda`, fallback 44% (11/25) |
+| **Latency warm (100% hit)** | **1593ms** (`data/processed/bench_warm.json:1`) | Remote Redis RTT 300-2019ms dominates; ideal local <10ms. Cold 339s wall → warm 57s wall |
+| **Cache hit rate** | **0% cold / 100% warm** |  |
+| **Fallback routing (new)** | **44% (11/25)** | Threshold router `FAISS top-1 < 0.30 → fallback` gives 14/11 split vs intended 16/9 (tuned from 0.30 vs 0.25 gave 19/6) |
 | **GPU** | **GTX 1650 4GB, CUDA 12.4, torch 2.6.0+cu124** | `torch.cuda.is_available() True` |
 
 **Honest caveats:**
-- **Remote Redis RTT** inflates warm-cache latency (1759ms vs expected <10ms). Would be near-zero with local Docker Redis.
-- **Groq rate-limit** (8000 TPM on_demand) inflates cold wall latency (retries). Clean latency 9166ms is the API time; wall 14832ms includes backoff.
-- **Rerank lift negative** is artifact of heuristic `eval_labels.json` (keyword presence, not manual ground truth) + small corpus where FAISS already ranks lexical matches high; cross-encoder optimizes relevance not cosine. Manual labeling needed for true lift.
-- **Ollama not benchmarked** — server not installed locally, `Latency (Ollama)` N/A.
-- **Heuristic labels** are noisy; 2-3 queries (e.g. `cross-encoder` explanation) have no true LangChain chunk, forced labels via overlap.
+- **Warm latency still high:** Remote Redis `retroradiant-blissful-celery:19885` RTT 300-2019ms dominates warm hits (1593ms); local Docker Redis would be <10ms.
+- **Cold wall inflated:** Groq TPD 200k limit hit after ~13 queries (429 retries); clean 8258ms is API only, wall 12878ms includes backoff. TPD limit, not code, is bottleneck.
+- **Precision low (6.2%):** Corpus is noisy — many pages share `Agent = Model + Harness` header, `FAISS` term in 0/304 chunks (vectorstore pages 404), so even hand-verified labels (first chunk from expected source) are often not in top-3. Larger/cleaner corpus needed.
+- **Rerank lift 0:** Hand-verified replaces heuristic -11.8pp; cross-encoder didn't help/hurt on this corpus+labels.
+- **Ollama not benchmarked** — server not installed, `Latency (Ollama)` N/A.
 
 ## Key engineering decisions & trade-offs
 
@@ -44,7 +44,8 @@ Domain RAG over LangChain/LangGraph docs (304 chunks from 44 docs). Ingest → s
 - **Normalization fix:** Added explicit `faiss.normalize_L2` in `build_index()` and `search()` (`src/embed_index.py:78,187`) even though torch already normalized — sanity `norms mean=1.0000`. Verified `k=15`.
 - **Perf: model caching:** `src/embed_index.py:11` caches `_EMB_TOK/_CE_TOK` module-level; `src/benchmark.py:56` loads embedding once. Cut per-query reload from ~3 loads to 1.
 - **Latency measurement fix:** `src/generate.py:18` now tracks `LAST_CLEAN_LATENCY_MS` (API only excl. `sleep`), `src/benchmark.py:89` logs `clean` vs `wall` and cache-hit as Redis wall (not stale generation time).
-- **Corpus filtering:** 8/25 fallback queries excluded from precision to avoid noise; `eval_labels.json` now marks `answerable` flag.
+- **Corpus filtering + hand-verified labels:** 9/25 fallback queries excluded; `eval_labels.json:1` now marks `answerable` and hand-verified by reading chunk text (e.g. `cross-encoder` moved to fallback after checking 0/304 chunks contain term, 16/25 remain). Previous keyword heuristic gave -11.8pp, hand-verified gives 0.0pp — still low due to noisy corpus.
+- **Router threshold fix:** Replaced naive `keyword:`/`len<=2` heuristic (`src/agent.py:39`) with similarity-threshold `FAISS top-1 < 0.30 → fallback` (`src/agent.py:45`). Gives 14/11 split vs intended 16/9 (tuned: 0.30 → 14/11, 0.25 → 19/6). Stores `_router_hits` to avoid double retrieval.
 
 ## Likely interview Q&A
 
@@ -52,7 +53,10 @@ Domain RAG over LangChain/LangGraph docs (304 chunks from 44 docs). Ingest → s
 - Standardizes tool serving (stdio/SSE) via `mcp` protocol, so retrieval can be swapped/hosted remotely without changing agent. `langchain-mcp-adapters` loads it as LangChain tool. Plain functions work for demo fallback, but MCP shows protocol awareness.
 
 **Q: Why did reranking underperform initially?**
-- First metric was cosine lift — wrong yardstick (FAISS optimizes cosine). Cross-encoder optimizes query-document relevance (logits), not embedding cosine. Also heuristic labels were noisy and `k` was small. Fixed to `precision@3` on answerable subset; true lift needs manual labels.
+- First metric was cosine lift (-8.5%) — wrong yardstick (FAISS optimizes cosine). Replaced with `precision@3` on heuristic labels (-11.8pp). After hand-verifying 16/25 labels by reading chunk text, lift is **0.0pp (6.2% vs 6.2%)** — cross-encoder neither helped nor hurt on this noisy corpus (many pages share same header, `FAISS` in 0 chunks). True lift needs larger/cleaner corpus + manual labels.
+
+**Q: Router was always 0% fallback — how fixed?**
+- Naive heuristic (`keyword:` or `len<=2`, `src/agent.py:39`) sent `25/25` to retrieval vs intended `16/9`. Replaced with similarity-threshold `FAISS top-1 < 0.30 → fallback` (`src/agent.py:45`), now **14/11 split** (tuned: 0.30 → 14/11, 0.25 → 19/6) and caches `_router_hits` to avoid double retrieval.
 
 **Q: How would you scale this?**
 - Shard FAISS (IVF/PQ) for >10k chunks, use async embedding, add Redis cluster or local cache, batch Groq calls, add eval set with human labels, move MCP to SSE/HTTP for remote, add LangGraph persistence (`checkpointer`).
