@@ -1,0 +1,12 @@
+.env
+data/
+__pycache__/
+*.pyc
+README.md
+.ipynb_checkpoints/
+.venv/
+venv/
+mlruns/
+wandb/
+*.faiss
+*.pkl
