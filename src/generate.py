@@ -15,7 +15,11 @@ def load_config():
     with open(CONFIG_PATH) as f:
         return yaml.safe_load(f)
 
+LAST_CLEAN_LATENCY_MS = None  # clean Groq API time excl. backoff, set per call
+LAST_TOTAL_LATENCY_MS = None    # wall including retries (for reference)
+
 def generate_groq(prompt: str, model: str = None, retries=3) -> str:
+    global LAST_CLEAN_LATENCY_MS, LAST_TOTAL_LATENCY_MS
     cfg = load_config()
     model = model or cfg["models"]["groq"]
     api_key = os.getenv("GROQ_API_KEY")
@@ -24,14 +28,19 @@ def generate_groq(prompt: str, model: str = None, retries=3) -> str:
     from groq import Groq
     client = Groq(api_key=api_key)
     last_err = None
+    total_t0 = time.time()
     for attempt in range(retries):
         try:
+            api_t0 = time.time()
             resp = client.chat.completions.create(
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.2,
                 max_tokens=800,
             )
+            clean = (time.time() - api_t0) * 1000
+            LAST_CLEAN_LATENCY_MS = clean
+            LAST_TOTAL_LATENCY_MS = (time.time() - total_t0) * 1000
             return resp.choices[0].message.content.strip()
         except Exception as e:
             last_err = e
@@ -41,10 +50,11 @@ def generate_groq(prompt: str, model: str = None, retries=3) -> str:
                 print(f"[groq] rate limited, retry {attempt+1}/{retries} in {wait}s: {e}")
                 time.sleep(wait)
             else:
-                # non-rate error: retry once
                 time.sleep(1)
                 if attempt == retries - 1:
                     raise
+    LAST_CLEAN_LATENCY_MS = None
+    LAST_TOTAL_LATENCY_MS = (time.time() - total_t0) * 1000
     raise last_err
 
 def generate_ollama(prompt: str, model: str = None) -> str:

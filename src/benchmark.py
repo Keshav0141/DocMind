@@ -1,5 +1,5 @@
 """
-benchmark.py — Day 5/6: MLflow + W&B tracking, metrics, rerank lift
+benchmark.py — Day 5/6: MLflow + W&B tracking, precision@3 rerank lift, clean latency
 """
 import os
 import time
@@ -27,15 +27,23 @@ def run_benchmark(provider="groq", limit=25):
     device = "cuda" if __import__("torch").cuda.is_available() else "cpu"
     print(f"[bench] provider={provider} device={device}")
 
-    # load eval queries
     eval_path = Path(cfg["benchmark"]["eval_queries_path"])
     queries = [l.strip() for l in eval_path.read_text(encoding="utf-8").splitlines() if l.strip()][:limit]
 
-    # init mlflow
+    # load labels for precision@3
+    labels_path = Path("data/processed/eval_labels.json")
+    if not labels_path.exists():
+        labels_path = Path(cfg["paths"]["processed_dir"]) / "eval_labels.json"
+    eval_labels = {}
+    if labels_path.exists():
+        eval_labels = json.loads(labels_path.read_text(encoding="utf-8"))
+        print(f"[bench] loaded labels for {len(eval_labels)} queries from {labels_path}")
+    else:
+        print(f"[warn] no eval_labels.json at {labels_path}, precision will be 0")
+
     import mlflow
     mlflow.set_experiment(cfg["benchmark"]["mlflow_experiment"])
 
-    # init wandb (optional)
     wandb_run = None
     try:
         import wandb
@@ -45,7 +53,7 @@ def run_benchmark(provider="groq", limit=25):
     except Exception as e:
         print(f"[wandb] init failed: {e}")
 
-    # load embedding model for relevance scoring via transformers (avoid ST segfault)
+    # load embedding model for relevance scoring (transformers, avoid ST segfault)
     from transformers import AutoTokenizer, AutoModel
     import torch
     cache_path = Path.home() / ".cache/huggingface/hub/models--sentence-transformers--all-MiniLM-L6-v2/snapshots/1110a243fdf4706b3f48f1d95db1a4f5529b4d41"
@@ -65,131 +73,161 @@ def run_benchmark(provider="groq", limit=25):
                 emb = (out.last_hidden_state * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1e-9)
                 emb = torch.nn.functional.normalize(emb, p=2, dim=1)
                 out_all.append(emb.cpu().numpy())
-            import numpy as np
             return np.vstack(out_all)
-    # wrapper for single
     def emb_encode(qs):
         return _emb(qs)
 
-    # optional cross-encoder rerank lift comparison: we compute FAISS-only vs reranked
     from src.agent import answer_question
     from src.embed_index import search
     import mlflow
+    import src.generate as gen_mod
 
-    latencies = []
+    latencies_clean = []  # clean Groq API time excl. backoff
+    latencies_wall = []   # total wall including retries + retrieval
+    cache_latencies = []  # wall for hits only
     relevance_scores = []
     cache_hits = 0
     fallback_routes = 0
-    rerank_lift_sum = 0
-
     sims_all = []
+
+    # helper for FAISS-only top-3 ids (no rerank)
+    def faiss_only_ids(query, k=15, top3=3):
+        import faiss
+        meta_path = Path(cfg["paths"]["metadata_path"])
+        index_path = Path(cfg["paths"]["index_path"])
+        with open(meta_path, "rb") as f:
+            chunks = pickle.load(f)
+        idx = faiss.read_index(str(index_path))
+        q_emb = emb_encode([query]).astype("float32")
+        import faiss as _f
+        _f.normalize_L2(q_emb)
+        scores, ids = idx.search(q_emb, k)
+        # ids[0] are faiss-ranked
+        return [chunks[i]["id"] for i in ids[0][:top3] if i != -1]
 
     with mlflow.start_run(run_name=f"bench-{provider}"):
         for q in tqdm(queries, desc=f"bench {provider}"):
-            t0 = time.time()
+            t0_wall = time.time()
             result = answer_question(q, provider=provider, use_cache=True)
-            latency = result.get("latency_ms", (time.time()-t0)*1000)
-            latencies.append(latency)
-            if result.get("cache_hit"):
+            wall = (time.time() - t0_wall) * 1000
+            is_hit = bool(result.get("cache_hit"))
+            if is_hit:
                 cache_hits += 1
+                clean = wall  # Redis lookup only
+                cache_latencies.append(wall)
+                total = wall
+            else:
+                # clean Groq latency from generate module (excl. backoff)
+                clean = gen_mod.LAST_CLEAN_LATENCY_MS
+                if clean is None:
+                    clean = result.get("latency_ms", wall)
+                total = wall
+
+            latencies_clean.append(clean if clean is not None else wall)
+            latencies_wall.append(total)
+
             if result.get("route") == "fallback":
                 fallback_routes += 1
 
             hits = result.get("hits", [])
-            # relevance: cosine between query and top hit text
             if hits:
                 q_emb = emb_encode([q])
                 h_emb = emb_encode([hits[0]["text"]])
                 sim = cosine_sim(q_emb[0], h_emb[0])
                 relevance_scores.append(sim)
                 sims_all.append(sim)
-                # rerank lift: compare faiss top-1 vs reranked top-1 (need to fetch both)
-                # do FAISS-only top-5 vs reranked; lift = rerank sim - faiss sim
-                try:
-                    faiss_hits = search(q, k=cfg["retrieval"]["faiss_k"], rerank_k=cfg["retrieval"]["faiss_k"])
-                    # faiss_hits is already reranked; to get FAISS-only we need raw FAISS
-                    # approximate: compute sim for faiss_scores vs rerank_scores ordering difference
-                    # simpler: just compare first hit sim vs average of top 3 sim
-                except:
-                    pass
             else:
                 relevance_scores.append(0)
 
-            mlflow.log_metric("latency_ms", latency, step=len(latencies))
+            mlflow.log_metric("clean_gen_latency_ms", clean if clean else wall, step=len(latencies_clean))
+            mlflow.log_metric("wall_latency_ms", wall, step=len(latencies_clean))
             if hits:
-                mlflow.log_metric("relevance", relevance_scores[-1], step=len(latencies))
+                mlflow.log_metric("relevance", relevance_scores[-1], step=len(latencies_clean))
 
-        # aggregate metrics
-        avg_latency = float(np.mean(latencies)) if latencies else 0
+        avg_clean = float(np.mean(latencies_clean)) if latencies_clean else 0
+        avg_wall = float(np.mean(latencies_wall)) if latencies_wall else 0
+        avg_cache = float(np.mean(cache_latencies)) if cache_latencies else 0
         avg_relevance = float(np.mean(relevance_scores)) if relevance_scores else 0
         relevance_pct = float(np.mean([1 if s > cfg["retrieval"]["similarity_threshold"] else 0 for s in relevance_scores]) * 100) if relevance_scores else 0
         hit_rate = float(cache_hits / len(queries) * 100) if queries else 0
         fallback_rate = float(fallback_routes / len(queries) * 100) if queries else 0
 
-        # rerank lift: compare FAISS-only top-3 avg sim vs rerank top-3 avg sim on a sample of 5 queries
-        lift_vals = []
-        for sq in queries[:5]:
-            import faiss, pickle
-            meta_path = Path(cfg["paths"]["metadata_path"])
-            index_path = Path(cfg["paths"]["index_path"])
-            if not index_path.exists():
-                break
-            with open(meta_path, "rb") as f:
-                chunks = pickle.load(f)
-            idx = faiss.read_index(str(index_path))
-            q_emb = emb_encode([sq]).astype("float32")
-            scores, ids = idx.search(q_emb, 10)
-            faiss_hits = [chunks[i]["text"] for i in ids[0][:3]]
-            faiss_sims = [cosine_sim(emb_encode([sq])[0], emb_encode([t])[0]) for t in faiss_hits]
-            faiss_avg = float(np.mean(faiss_sims)) if faiss_sims else 0
-            reranked = search(sq, k=10, rerank_k=3)
-            rerank_texts = [h["text"] for h in reranked]
-            rerank_sims = [cosine_sim(emb_encode([sq])[0], emb_encode([t])[0]) for t in rerank_texts]
-            rerank_avg = float(np.mean(rerank_sims)) if rerank_sims else 0
-            if faiss_avg > 0:
-                lift = (rerank_avg - faiss_avg) / faiss_avg * 100
-                lift_vals.append(lift)
-        rerank_lift = float(np.mean(lift_vals)) if lift_vals else 0
+        # precision@3 for FAISS-only vs FAISS+rerank
+        prec_faiss = []
+        prec_rerank = []
+        for q in queries:
+            correct_ids = set(eval_labels.get(q, []))
+            if not correct_ids:
+                # no label -> skip (don't penalize fallback queries with no true chunk)
+                continue
+            # faiss-only
+            f_ids = set(faiss_only_ids(q, k=cfg["retrieval"]["faiss_k"], top3=3))
+            p_f = 1.0 if (f_ids & correct_ids) else 0.0
+            prec_faiss.append(p_f)
+            # reranked
+            try:
+                r_hits = search(q, k=cfg["retrieval"]["faiss_k"], rerank_k=3)
+                r_ids = set([h["id"] for h in r_hits[:3]])
+                p_r = 1.0 if (r_ids & correct_ids) else 0.0
+                prec_rerank.append(p_r)
+            except Exception as e:
+                print(f"[warn] rerank prec failed for {q[:30]}: {e}")
+                prec_rerank.append(0.0)
 
-        mlflow.log_metric("avg_latency_ms", avg_latency)
+        prec_faiss_avg = float(np.mean(prec_faiss)*100) if prec_faiss else 0.0
+        prec_rerank_avg = float(np.mean(prec_rerank)*100) if prec_rerank else 0.0
+        prec_lift = prec_rerank_avg - prec_faiss_avg
+
+        mlflow.log_metric("avg_clean_latency_ms", avg_clean)
+        mlflow.log_metric("avg_wall_latency_ms", avg_wall)
+        mlflow.log_metric("avg_cache_latency_ms", avg_cache)
         mlflow.log_metric("avg_relevance", avg_relevance)
         mlflow.log_metric("relevance_pct", relevance_pct)
         mlflow.log_metric("cache_hit_rate", hit_rate)
         mlflow.log_metric("fallback_rate", fallback_rate)
-        mlflow.log_metric("rerank_lift_pct", rerank_lift)
+        mlflow.log_metric("precision_faiss_p3", prec_faiss_avg)
+        mlflow.log_metric("precision_rerank_p3", prec_rerank_avg)
+        mlflow.log_metric("precision_lift", prec_lift)
         mlflow.log_param("provider", provider)
         mlflow.log_param("device", device)
 
-        print(f"\n[bench:{provider}] avg_latency={avg_latency:.0f}ms relevance={relevance_pct:.1f}% hit_rate={hit_rate:.1f}% fallback={fallback_rate:.1f}% rerank_lift={rerank_lift:.1f}%")
+        print(f"\n[bench:{provider}] clean_gen={avg_clean:.0f}ms wall={avg_wall:.0f}ms cache_hit_lat={avg_cache:.0f}ms relevance={relevance_pct:.1f}% hit_rate={hit_rate:.1f}% fallback={fallback_rate:.1f}%")
+        print(f"[bench:{provider}] precision@3 FAISS={prec_faiss_avg:.1f}% rerank={prec_rerank_avg:.1f}% lift={prec_lift:.1f}pp (n={len(prec_faiss)})")
 
         if wandb_run:
             import wandb
             wandb.log({
-                "avg_latency_ms": avg_latency,
+                "avg_clean_latency_ms": avg_clean,
+                "avg_wall_latency_ms": avg_wall,
+                "avg_cache_latency_ms": avg_cache,
                 "avg_relevance": avg_relevance,
                 "relevance_pct": relevance_pct,
                 "cache_hit_rate": hit_rate,
                 "fallback_rate": fallback_rate,
-                "rerank_lift_pct": rerank_lift,
+                "precision_faiss_p3": prec_faiss_avg,
+                "precision_rerank_p3": prec_rerank_avg,
+                "precision_lift": prec_lift,
                 "provider": provider,
             })
-            # log similarity distribution
             if sims_all:
                 import wandb as wb
                 table = wb.Table(data=[[s] for s in sims_all], columns=["similarity"])
                 wandb.log({"similarity_hist": wb.plot.histogram(table, "similarity", title="retrieval similarity")})
             wandb.finish()
 
-        # save json summary
         summary = {
             "provider": provider,
             "num_queries": len(queries),
-            "avg_latency_ms": avg_latency,
+            "avg_clean_latency_ms": avg_clean,
+            "avg_wall_latency_ms": avg_wall,
+            "avg_cache_latency_ms": avg_cache,
             "avg_relevance": avg_relevance,
             "relevance_pct": relevance_pct,
             "cache_hit_rate": hit_rate,
             "fallback_rate": fallback_rate,
-            "rerank_lift_pct": rerank_lift,
+            "precision_faiss_p3": prec_faiss_avg,
+            "precision_rerank_p3": prec_rerank_avg,
+            "precision_lift_pp": prec_lift,
             "device": device,
         }
         out_path = Path(f"data/processed/bench_{provider}.json")
