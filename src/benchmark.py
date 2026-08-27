@@ -152,14 +152,22 @@ def run_benchmark(provider="groq", limit=25):
         hit_rate = float(cache_hits / len(queries) * 100) if queries else 0
         fallback_rate = float(fallback_routes / len(queries) * 100) if queries else 0
 
-        # precision@3 for FAISS-only vs FAISS+rerank
+        # precision@3 for FAISS-only vs FAISS+rerank — filter to corpus-answerable only
         prec_faiss = []
         prec_rerank = []
+        answerable_count = 0
         for q in queries:
-            correct_ids = set(eval_labels.get(q, []))
+            v = eval_labels.get(q, [])
+            # handle new format {ids, answerable}
+            if isinstance(v, dict):
+                if not v.get("answerable", True):
+                    continue
+                correct_ids = set(v.get("ids", []))
+            else:
+                correct_ids = set(v)
             if not correct_ids:
-                # no label -> skip (don't penalize fallback queries with no true chunk)
                 continue
+            answerable_count += 1
             # faiss-only
             f_ids = set(faiss_only_ids(q, k=cfg["retrieval"]["faiss_k"], top3=3))
             p_f = 1.0 if (f_ids & correct_ids) else 0.0
@@ -192,7 +200,7 @@ def run_benchmark(provider="groq", limit=25):
         mlflow.log_param("device", device)
 
         print(f"\n[bench:{provider}] clean_gen={avg_clean:.0f}ms wall={avg_wall:.0f}ms cache_hit_lat={avg_cache:.0f}ms relevance={relevance_pct:.1f}% hit_rate={hit_rate:.1f}% fallback={fallback_rate:.1f}%")
-        print(f"[bench:{provider}] precision@3 FAISS={prec_faiss_avg:.1f}% rerank={prec_rerank_avg:.1f}% lift={prec_lift:.1f}pp (n={len(prec_faiss)})")
+        print(f"[bench:{provider}] precision@3 FAISS={prec_faiss_avg:.1f}% rerank={prec_rerank_avg:.1f}% lift={prec_lift:.1f}pp (n={answerable_count}/{len(queries)} answerable)")
 
         if wandb_run:
             import wandb

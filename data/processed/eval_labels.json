@@ -1,0 +1,223 @@
+{
+  "What is LangChain and what are its main components?": {
+    "ids": [
+      "dbeb97ba_0",
+      "8c9fce64_0",
+      "0ca9b95d_0"
+    ],
+    "answerable": true,
+    "reason": "corpus-answerable"
+  },
+  "How does LangGraph differ from LangChain?": {
+    "ids": [
+      "dbeb97ba_0",
+      "8c9fce64_0",
+      "0ca9b95d_0"
+    ],
+    "answerable": true,
+    "reason": "corpus-answerable"
+  },
+  "What is a vector store and how is FAISS used?": {
+    "ids": [
+      "df975408_5",
+      "df975408_13",
+      "996dea03_5"
+    ],
+    "answerable": true,
+    "reason": "corpus-answerable"
+  },
+  "Explain RAG and its retrieval step": {
+    "ids": [
+      "c739f95a_6",
+      "1b5bc564_3",
+      "df975408_0"
+    ],
+    "answerable": true,
+    "reason": "corpus-answerable"
+  },
+  "How do you chunk documents for embeddings?": {
+    "ids": [
+      "df975408_6",
+      "df975408_7",
+      "df975408_10"
+    ],
+    "answerable": true,
+    "reason": "corpus-answerable"
+  },
+  "What is a cross-encoder and why rerank after FAISS?": {
+    "ids": [
+      "cb6c0a15_9"
+    ],
+    "answerable": true,
+    "reason": "corpus-answerable"
+  },
+  "How does MCP expose tools to an agent?": {
+    "ids": [
+      "dbeb97ba_5",
+      "8c9fce64_5",
+      "0ca9b95d_5"
+    ],
+    "answerable": true,
+    "reason": "corpus-answerable"
+  },
+  "What is the difference between Groq and Ollama for generation?": {
+    "ids": [
+      "df975408_0",
+      "996dea03_0",
+      "eb50bdc6_0"
+    ],
+    "answerable": true,
+    "reason": "corpus-answerable"
+  },
+  "How do you use Redis as a cache for RAG?": {
+    "ids": [
+      "f7d7a425_1",
+      "831e0e59_1"
+    ],
+    "answerable": false,
+    "reason": "fallback-only"
+  },
+  "What are LangChain retrievers and how do they work?": {
+    "ids": [
+      "df975408_6",
+      "df975408_7",
+      "996dea03_6"
+    ],
+    "answerable": true,
+    "reason": "corpus-answerable"
+  },
+  "How to load a PDF document in LangChain?": {
+    "ids": [
+      "f7d7a425_0",
+      "831e0e59_0",
+      "df975408_0"
+    ],
+    "answerable": true,
+    "reason": "corpus-answerable"
+  },
+  "How to build a chatbot with memory in LangGraph?": {
+    "ids": [
+      "dbeb97ba_5",
+      "8c9fce64_5",
+      "0ca9b95d_5"
+    ],
+    "answerable": true,
+    "reason": "corpus-answerable"
+  },
+  "What is tool calling in LangChain?": {
+    "ids": [
+      "e98aa063_4",
+      "cb6c0a15_12",
+      "cb6c0a15_13"
+    ],
+    "answerable": true,
+    "reason": "corpus-answerable"
+  },
+  "How to use prompt templates?": {
+    "ids": [
+      "dbeb97ba_0",
+      "dbeb97ba_1",
+      "dbeb97ba_2"
+    ],
+    "answerable": true,
+    "reason": "corpus-answerable"
+  },
+  "What is an embedding model?": {
+    "ids": [
+      "cb6c0a15_5",
+      "f7d7a425_0",
+      "831e0e59_0"
+    ],
+    "answerable": true,
+    "reason": "corpus-answerable"
+  },
+  "Explain FAISS similarity search": {
+    "ids": [
+      "df975408_5",
+      "df975408_7",
+      "df975408_13"
+    ],
+    "answerable": true,
+    "reason": "corpus-answerable"
+  },
+  "What is the purpose of text splitters?": {
+    "ids": [
+      "df975408_10",
+      "996dea03_10",
+      "eb50bdc6_10"
+    ],
+    "answerable": true,
+    "reason": "corpus-answerable"
+  },
+  "How to track RAG experiments with MLflow or W&B?": {
+    "ids": [
+      "cb6c0a15_0",
+      "c739f95a_1"
+    ],
+    "answerable": false,
+    "reason": "fallback-only"
+  },
+  "What is the fallback tool in DocMind?": {
+    "ids": [
+      "dbeb97ba_0",
+      "dbeb97ba_1",
+      "dbeb97ba_2"
+    ],
+    "answerable": false,
+    "reason": "fallback-only"
+  },
+  "How does the agent decide which tool to use?": {
+    "ids": [
+      "dbeb97ba_0",
+      "dbeb97ba_1",
+      "dbeb97ba_2"
+    ],
+    "answerable": false,
+    "reason": "fallback-only"
+  },
+  "Compare latency of Groq vs Ollama": {
+    "ids": [
+      "f7d7a425_0",
+      "831e0e59_0",
+      "dbeb97ba_0"
+    ],
+    "answerable": false,
+    "reason": "fallback-only"
+  },
+  "What is agentic memory and how is it implemented?": {
+    "ids": [
+      "dbeb97ba_5",
+      "8c9fce64_5",
+      "0ca9b95d_5"
+    ],
+    "answerable": false,
+    "reason": "fallback-only"
+  },
+  "How to evaluate retrieval relevance?": {
+    "ids": [
+      "df975408_5",
+      "df975408_7",
+      "df975408_13"
+    ],
+    "answerable": false,
+    "reason": "fallback-only"
+  },
+  "What is the typical chunk size for RAG?": {
+    "ids": [
+      "df975408_9",
+      "996dea03_9",
+      "eb50bdc6_9"
+    ],
+    "answerable": true,
+    "reason": "corpus-answerable"
+  },
+  "How to connect to Redis Cloud?": {
+    "ids": [
+      "c739f95a_1",
+      "c739f95a_2",
+      "dbeb97ba_5"
+    ],
+    "answerable": false,
+    "reason": "fallback-only"
+  }
+}
