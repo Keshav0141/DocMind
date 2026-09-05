@@ -70,7 +70,7 @@ Runs the 25-query eval set end to end, logs latency/relevance/cache metrics to M
 | Router | FAISS top-1 < 0.30 → fallback (14/11 split vs intended 16/9) |
 | Relevance (cosine >0.35) | 52.0% |
 
-Precision@3 was measured against hand-verified labels (16 of 25 queries have a verifiable answer chunk; 9 target the fallback tool — `cross-encoder` query moved to fallback after checking 0/304 chunks contain the term). Both retrievers scored 1/16, so lift is 0.0pp — the earlier -11.8pp/ -4.0pp was from keyword-heuristic labels and is now replaced. Small corpus + noisy LangChain docs (many pages share the same `Agent = Model + Harness` header, `FAISS` term in 0 chunks) keep absolute precision low; a larger, cleaner corpus would be needed for higher numbers.
+Precision@3 was measured against hand-verified labels (16 of 25 queries have a verifiable answer chunk; 9 target the fallback tool — `cross-encoder` query moved to fallback after checking 0/304 chunks contain the term). Both retrievers scored 1/16, so lift is 0.0pp — the earlier -11.8pp/ -4.0pp was from keyword-heuristic labels and is now replaced. Root cause is corpus gap, not reranking: 2/44 source docs 404'd (`vectorstores/faiss`, `document_loaders/web_loaders` → `docs.langchain.com` redirect) and `FAISS` term is absent from all 304 chunks, so retrieval ceiling is capped before reranking can help; a larger/cleaner corpus would be needed for higher numbers.
 
 ## Notes
 
